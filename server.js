@@ -29,7 +29,14 @@ async function query(q, params) {
   const c = await pool.connect();
   try { return await c.query(q, params); } finally { c.release(); }
 }
+app.use((req, _res, next) => {
+  console.log(`[REQ] ${req.method} ${req.url}`);
+  next();
+});
 
+app.post("/echo", express.json(), (req, res) => {
+  res.json({ ok: true, you_sent: req.body, headers: req.headers });
+});
 app.get("/health", async (_req, res) => {
   try { await query("select 1"); res.json({ ok: true }); }
   catch (e) { logger.error(e); res.status(500).json({ ok:false, error: e.message }); }
