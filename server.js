@@ -20,7 +20,10 @@ const {
 } = process.env;
 
 const { Pool } = pg;
-const pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: true } });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false } // <— clave para evitar el error del certificado
+});
 
 async function query(q, params) {
   const c = await pool.connect();
