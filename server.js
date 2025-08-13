@@ -43,17 +43,34 @@ function requireAppSecret(req, res, next) {
 }
 
 app.post("/events/transaction", requireAppSecret, async (req, res) => {
-  const { ts, lat, lon, address, card_last4, user_id = "demo" } = req.body || {};
-  if (!ts || lat == null || lon == null) return res.status(400).json({ error: "missing fields" });
   try {
-    const r = await query(
-      `insert into tap_events (user_id, ts, lat, lon, address)
-       values ($1, $2, $3, $4, $5) returning id`,
-      [user_id, ts, lat, lon, address || null]
-    );
-    res.json({ ok: true, id: r.rows[0].id });
+    let { ts, lat, lon, address, card_last4, user_id = "demo" } = req.body || {};
+    if (!ts || lat == null || lon == null) {
+      return res.status(400).json({ error: "missing fields" });
+    }
+
+    // Normaliza lat/lon: acepta "‑33,44" o "‑33.44"
+    const toNum = (x) => {
+      if (x === null || x === undefined) return null;
+      const s = String(x).replace(",", ".");
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    };
+    const latN = toNum(lat);
+    const lonN = toNum(lon);
+    if (latN == null || lonN == null) {
+      return res.status(400).json({ error: "bad lat/lon" });
+    }
+
+    // Inserta
+    const q = `insert into tap_events (user_id, ts, lat, lon, address)
+               values ($1, $2, $3, $4, $5) returning id`;
+    const r = await query(q, [user_id, ts, latN, lonN, address || null]);
+
+    return res.json({ ok: true, id: r.rows[0].id });
   } catch (e) {
-    logger.error(e); res.status(500).json({ ok:false, error: e.message });
+    logger.error(e);
+    return res.status(500).json({ ok: false, error: e.message });
   }
 });
 
