@@ -175,5 +175,28 @@ app.post("/jobs/refresh", async (_req, res) => {
     logger.error(e); res.status(500).json({ ok:false, error: e.message });
   }
 });
-
+// Igual que /events/transaction, pero vía GET con querystring
+app.get("/events/transaction-get", requireAppSecret, async (req, res) => {
+  try {
+    const { ts, lat, lon, address, user_id = "demo" } = req.query || {};
+    if (!ts || lat == null || lon == null) {
+      return res.status(400).json({ ok:false, error: "missing fields" });
+    }
+    const toNum = (x) => {
+      const s = String(x).replace(",", ".");
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    };
+    const latN = toNum(lat), lonN = toNum(lon);
+    if (latN == null || lonN == null) {
+      return res.status(400).json({ ok:false, error: "bad lat/lon" });
+    }
+    const q = `insert into tap_events (user_id, ts, lat, lon, address)
+               values ($1, $2, $3, $4, $5) returning id`;
+    const r = await query(q, [user_id, ts, latN, lonN, address || null]);
+    return res.json({ ok:true, id: r.rows[0].id });
+  } catch (e) {
+    return res.status(500).json({ ok:false, error: e.message });
+  }
+});
 app.listen(PORT, () => logger.info(`API listening on :${PORT}`));
