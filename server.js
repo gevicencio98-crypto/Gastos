@@ -169,6 +169,18 @@ async function aiCategoryZeroShot(text, labels = CATEGORIES) {
   }
 }
 
+async function getCreditCardAccountId(last4) {
+  const r = await FINTOC.get("/accounts", { 
+    params: { link_token: process.env.FINTOC_LINK_TOKEN } 
+  });
+  const accounts = r.data || [];
+  const match = accounts.find(
+    a => a.type === "credit_card" && a.number?.endsWith(last4)
+  );
+  if (!match) throw new Error("No credit card found with last4: " + last4);
+  return match.id;
+}
+
 async function classifyCategory({ descripcion, merchant, monto }) {
   const text = buildIAInput({ descripcion, merchant, monto });
   const ai = await aiCategoryZeroShot(text, CATEGORIES);
@@ -438,6 +450,13 @@ app.get("/jobs/refresh", async (req, res) => {
   const debug = String(req.query.debug || "0") === "1";
   const dryRun = String(req.query.dry_run || "0") === "1";
   const limit = Number(req.query.limit || 0);
+  const last4 = req.query.last4;
+  let accountId;
+  if (last4) {
+    accountId = await getCreditCardAccountId(last4);
+  } else {
+    accountId = await getCreditCardAccountId("4371"); // por defecto
+  }
 
   try {
     // 1) Determinar qué cuentas procesar
