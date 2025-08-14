@@ -45,7 +45,7 @@ const CATEGORIES = [
 const KW = {
   "Transporte": [
     "uber","cabify","didi","beat","taxi","metro","subte","bus","bip","autopista","tag",
-    "estacionamiento","parking","peaje","red movilidad","latam"
+    "estacionamiento","parking","peaje","red movilidad","latam","lime"
   ],
   "Comida": [
     "cafe","cafetería","cafeteria","restaurant","restobar","bar","pub","burger","pizza","sushi","empanada",
@@ -60,7 +60,7 @@ const KW = {
   ],
   "Suscripciones": [
     "netflix","spotify","youtube premium","youtube","disney+","disney plus","amazon prime","hbo","max","appletv",
-    "apple tv","icloud","xbox game pass","playstation plus","patreon","notion","dropbox","adobe","microsoft 365"
+    "apple tv","apple","icloud","xbox game pass","playstation plus","patreon","notion","dropbox","adobe","microsoft 365"
   ],
   "Servicios básicos": [
     "luz","electricidad","enel","cge","gas","metrogas","lipigas","abastible","gasco",
