@@ -70,7 +70,7 @@ const KW = {
   "Entretenimiento": [
     "cine","cinemark","cinépolis","ticket","passline","puntoticket","event","concierto","festival","teatro",
     "casino","discoteca","discoteque","club","bar","tragos","alcohol","liquidos","licores","vino","cerveza",
-    "steam","epic games","xbox","playstation","nintendo","juego"
+    "steam","epic games","xbox","playstation","nintendo","juego","event","evento"
   ],
   "Delivery": [
     "ubereats","uber eats","rappi","pedidosya","pedido ya","just eat","cornershop","jokr","glovo"
