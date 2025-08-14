@@ -33,10 +33,23 @@ const pool = new Pool({
 
 // --- CATEGORIZACIÓN ---
 const CATEGORIES = [
-  "Supermercado", "Comida y Bebida", "Transporte", "Combustible",
-  "Suscripciones", "Servicios", "Salud", "Educación",
-  "Entretenimiento", "Viajes", "Ropa", "Hogar", "Tecnología",
-  "Finanzas", "Otros"
+  "Supermercado (compras en supermercados y minimarkets)",
+  "Comida y Bebida (cafeterías y restaurantes)",
+  "Transporte (Uber, taxis, metro, buses)",
+  "Combustible (gasolineras)",
+  "Suscripciones (Netflix, Spotify, etc.)",
+  "Servicios (internet, teléfono, luz, agua, gas)",
+  "Salud (farmacias, clínicas)",
+  "Educación (colegio, cursos)",
+  "Entretenimiento (cine, tickets, juegos)",
+  "Viajes (aerolíneas, hoteles)",
+  "Ropa (retail vestuario)",
+  "Hogar (mejoras, ferretería)",
+  "Tecnología (equipos, software)",
+  "Finanzas (comisiones bancarias)",
+  "Fiesta (carrete,entradas, eventos, bebidas alcoholicas)",
+  "Delivery (Uber eats, Rappi, PedidosYa)",
+  "Otros"
 ];
 
 // Heurística simple si no hay IA (palabras clave -> categoría)
@@ -57,38 +70,47 @@ function heuristicCategory(s) {
   if (["apple","iphone","mac","pc","samsung","computador"].some(has)) return "Tecnología";
   if (["comisión","cargo banco","interés"].some(has)) return "Finanzas";
   if (["café","restaurant","restobar","burger","pizza","sushi","kfc","mc donald","mcdonald"].some(has)) return "Comida y Bebida";
+  if (["rappi","pedidos","ubereats"].some(has)) return "Delivery";
+  if (["liquidos"].some(has)) return "Fiesta";
   return "Otros";
 }
 
 // Llama Hugging Face Zero-Shot (BART-MNLI) si hay token
 // Modelo recomendado para español/multilenguaje:
 const HF_MODEL = process.env.HF_MODEL || "joeddav/xlm-roberta-large-xnli";
-// Si prefieres BART (inglés): "facebook/bart-large-mnli"
+// Probar también: "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7"
 
 async function aiCategoryZeroShot(text, labels=CATEGORIES) {
   const token = process.env.HF_API_TOKEN;
-  if (!token) return null; // si no hay token, cae a heurística
+  if (!token) return null;
+
+  const body = {
+    inputs: text,
+    parameters: {
+      // Etiquetas en español, bien definidas
+      candidate_labels: labels,            // puedes pasar array directamente
+      multi_label: false,                  // una sola categoría
+      // 👇 Plantilla/prompt en español: mejora bastante
+      hypothesis_template: "Esta transacción pertenece a la categoría {label}."
+    }
+  };
 
   try {
     const resp = await fetch(`https://api-inference.huggingface.co/models/${HF_MODEL}`, {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${token}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({
-        inputs: text,
-        parameters: { candidate_labels: labels.join(", ") } // también puedes enviar array
-      })
+      body: JSON.stringify(body)
     });
-
-    if (!resp.ok) return null; // evita botar el flujo si el servicio rate-limita
+    if (!resp.ok) return null;
     const data = await resp.json();
 
-    // En Inference API, la respuesta suele incluir 'labels' ordenadas por score
+    // Respuesta típica: {labels: [...], scores: [...]}
     if (Array.isArray(data.labels) && data.labels.length) return data.labels[0];
 
-    // Algunos providers devuelven formato distinto; contempla ambas
+    // Algunos providers devuelven un array de resultados
     if (Array.isArray(data) && data[0]?.labels?.length) return data[0].labels[0];
 
     return null;
@@ -98,8 +120,8 @@ async function aiCategoryZeroShot(text, labels=CATEGORIES) {
 }
 
 async function classifyCategory({ descripcion, merchant, monto }) {
-  const baseText = [merchant, descripcion].filter(Boolean).join(" - ").trim();
-  const text = baseText || `monto ${monto}`;
+  const baseText = [merchant, descripcion, `monto ${monto} CLP`].filter(Boolean).join(" - ");
+  const text = `Clasifica en una única categoría el siguiente comercio de Chile, hazlo según las palabras claves, si no sabes déjalo como otros. Por ejem: Liquidos es una conocida botillería en chile, por lo tanto sería Fiesta, mientras que Diddi, Pedidos Ya, Rappi son conocidas apps de delivery, por lo que deberían ser Delivery  ${baseText}`;
   const ai = await aiCategoryZeroShot(text);
   return ai || heuristicCategory(text);
 }
