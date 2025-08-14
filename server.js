@@ -388,6 +388,7 @@ app.get("/jobs/refresh", async (req, res) => {
         on conflict (id) do update set
           user_id     = excluded.user_id,
           fecha       = excluded.fecha,
+          tipo_cuenta = excluded.tipo_cuenta,
           monto       = excluded.monto,
           moneda      = excluded.moneda,
           descripcion = excluded.descripcion,
