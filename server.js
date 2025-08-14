@@ -170,12 +170,12 @@ async function aiCategoryZeroShot(text, labels = CATEGORIES) {
 }
 
 async function getCreditCardAccountId(last4) {
-  const r = await FINTOC.get("/accounts", { 
-    params: { link_token: process.env.FINTOC_LINK_TOKEN } 
+  const r = await FINTOC.get("/accounts", {
+    params: { link_token: process.env.FINTOC_LINK_TOKEN }
   });
   const accounts = r.data || [];
   const match = accounts.find(
-    a => a.type === "credit_card" && a.number?.endsWith(last4)
+    a => a.type === "credit_card" && a.number?.endsWith(String(last4))
   );
   if (!match) throw new Error("No credit card found with last4: " + last4);
   return match.id;
@@ -443,31 +443,49 @@ async function listMovements(accountId, per_page=300) {
 }
 
 // === NUEVO jobs/refresh con type + force + debug + cache merchant ===
+
+
+
 app.get("/jobs/refresh", async (req, res) => {
   const t0 = Date.now();
   const typeParam = String(req.query.type || "checking"); // 'checking' | 'credit' | 'all'
-  const force = String(req.query.force_reclass || "0") === "1";
-  const debug = String(req.query.debug || "0") === "1";
-  const dryRun = String(req.query.dry_run || "0") === "1";
-  const limit = Number(req.query.limit || 0);
-  const last4 = req.query.last4;
-  let accountId;
-  if (last4) {
-    accountId = await getCreditCardAccountId(last4);
-  } else {
-    accountId = await getCreditCardAccountId("4371"); // por defecto
-  }
+  const force   = String(req.query.force_reclass || "0") === "1";
+  const debug   = String(req.query.debug || "0") === "1";
+  const dryRun  = String(req.query.dry_run  || "0") === "1";
+  const limit   = Number(req.query.limit || 0);
+  const last4   = req.query.last4 ? String(req.query.last4) : null;
 
   try {
-    // 1) Determinar qué cuentas procesar
-    const types = (typeParam === "all") ? ["checking","credit"] : [typeParam];
+    const types = (typeParam === "all") ? ["checking", "credit"] : [typeParam];
 
     let totalUpserts = 0;
     let totalMatchedWithTap = 0;
 
     for (const kind of types) {
-      const accountId = await getAccountIdByType(kind);
-      let movs = await listMovements(accountId);
+      // === ELEGIR CUENTA CORRECTA SEGÚN TIPO Y last4 ===
+      let accountIdChosen = null;
+
+      if (kind === "credit") {
+        if (last4 && last4.length >= 2) {
+          // Usa la tarjeta exacta
+          accountIdChosen = await getCreditCardAccountId(last4);
+        } else {
+          // Opción A: una por defecto (p. ej. 4371)
+          try {
+            accountIdChosen = await getCreditCardAccountId("4371");
+          } catch {
+            // Opción B: si no está 4371, usa la primera de crédito disponible
+            accountIdChosen = await getAccountIdByType("credit");
+          }
+        }
+      } else {
+        // checking
+        accountIdChosen = await getAccountIdByType("checking");
+      }
+
+      debug && logger.info({ kind, last4, accountIdChosen }, "Using account");
+
+      let movs = await listMovements(accountIdChosen);
       if (limit && Number.isFinite(limit)) movs = movs.slice(0, limit);
 
       const taps = (await query(
@@ -475,18 +493,18 @@ app.get("/jobs/refresh", async (req, res) => {
         ["demo"]
       )).rows;
 
-      // 2) Reconcile por tiempo
+      // Reconcile por tiempo
       let merged = reconcile(taps, movs).map(m => {
         const merchant = m.merchant ?? m.raw?.merchant ?? m.raw?.counterparty?.name ?? null;
         return { ...m, merchant, categoria: m.categoria ?? null };
       });
 
-      // 3) Traer categorías ya guardadas (para NO reclasificar)
+      // Categorías ya guardadas
       const ids = merged.map(m => m.id);
       const existing = await query("select id, categoria from movements where id = any($1)", [ids]);
       const byId = new Map(existing.rows.map(r => [r.id, r.categoria]));
 
-      // 4) cargar cache de merchants existentes (opcional: on-demand)
+      // Cache merchant (si la tienes creada)
       async function getCachedCategory(merchant) {
         if (!merchant) return null;
         const key = merchant.trim().toLowerCase();
@@ -533,10 +551,9 @@ app.get("/jobs/refresh", async (req, res) => {
       for (const m of merged) {
         if (m.lat != null && m.lon != null) matchedWithTap++;
 
-        // === DECISIÓN DE CATEGORÍA SIN FORZAR ===
         let categoriaFinal = null;
-
         const catExisting = byId.get(m.id);
+
         if (catExisting && !force) {
           categoriaFinal = catExisting;
           debug && logger.info({ id: m.id, categoria: catExisting, source: "db", kind }, "skip classify (already set)");
@@ -544,13 +561,11 @@ app.get("/jobs/refresh", async (req, res) => {
           categoriaFinal = m.categoria;
           debug && logger.info({ id: m.id, categoria: m.categoria, source: "merged", kind }, "skip classify (merged)");
         } else {
-          // intentar cache por merchant
           const cached = await getCachedCategory(m.merchant);
           if (cached && !force) {
             categoriaFinal = cached;
             debug && logger.info({ id: m.id, categoria: cached, source: "cache", merchant: m.merchant, kind }, "use merchant cache");
           } else {
-            // llamar IA (o heurística si no hay token), solo si hace falta
             const t1 = Date.now();
             const ai = await aiCategoryZeroShot([m.merchant, m.descripcion].filter(Boolean).join(" - ") || `monto ${m.monto}`);
             if (ai) {
@@ -561,17 +576,15 @@ app.get("/jobs/refresh", async (req, res) => {
               categoriaFinal = heu;
               debug && logger.info({ id: m.id, categoria: heu, source: "heuristic", kind }, "classified");
             }
-            // guarda en cache por merchant
             await setCachedCategory(m.merchant, categoriaFinal);
           }
         }
 
-        // escribe (salvo dry-run)
         if (!dryRun) {
           await query(upsertQ, [
             m.id, m.user_id, m.fecha, m.monto, m.moneda, m.descripcion,
             m.merchant, m.pending, m.lat, m.lon, m.address, categoriaFinal, m.raw,
-            kind  // <= NUEVO: 'checking' o 'credit'
+            kind
           ]);
           upserts++;
         } else {
@@ -581,11 +594,11 @@ app.get("/jobs/refresh", async (req, res) => {
 
       totalUpserts += upserts;
       totalMatchedWithTap += matchedWithTap;
-      logger.info({ kind, upserts, matchedWithTap }, "refresh pass done");
+      logger.info({ kind, last4, accountIdChosen, upserts, matchedWithTap }, "refresh pass done");
     }
 
     const took = Date.now() - t0;
-    return res.json({ ok: true, upserts: totalUpserts, matchedWithTap: totalMatchedWithTap, ms: took, type: typeParam, force, dryRun });
+    return res.json({ ok: true, upserts: totalUpserts, matchedWithTap: totalMatchedWithTap, ms: took, type: typeParam, force, dryRun, last4 });
   } catch (e) {
     logger.error(e);
     return res.status(500).json({ ok:false, error: e.message });
