@@ -138,7 +138,7 @@ function reconcile(taps, movs) {
       id: m.id,
       user_id: "demo",
       fecha: t,
-      monto: (m.amount || 0) / 100.0,
+      monto: (m.amount || 0) ,
       moneda: m.currency || "CLP",
       descripcion: m.description || null,
       pending: !!m.pending,
