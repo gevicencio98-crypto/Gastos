@@ -150,7 +150,8 @@ function reconcile(taps, movs) {
   });
 }
 
-app.post("/jobs/refresh", async (_req, res) => {
+app.get("/jobs/refresh", async (req, res) => {
+  // reutiliza exactamente la misma lógica del POST /jobs/refresh
   try {
     const accountId = await getCheckingAccountId();
     const movs = await listRecentMovements(accountId);
