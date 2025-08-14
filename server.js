@@ -302,127 +302,163 @@ app.post("/jobs/reclassify", async (req, res) => {
 });
 
 
+// helper: elegir cuenta por tipo
+async function getAccountIdByType(type /* 'checking' | 'credit' */) {
+  const r = await FINTOC.get("/accounts", { params: { link_token: process.env.FINTOC_LINK_TOKEN } });
+  const accounts = r.data || [];
+  if (type === "credit") {
+    const cc = accounts.find(a => a.type === "credit_card");
+    if (!cc) throw new Error("No credit card account in link");
+    return cc.id;
+  }
+  // default checking
+  const chk = accounts.find(a => a.type === "checking_account") || accounts[0];
+  if (!chk) throw new Error("No accounts in link");
+  return chk.id;
+}
+
+async function listMovements(accountId, per_page=300) {
+  const r = await FINTOC.get(`/accounts/${accountId}/movements`, {
+    params: { link_token: process.env.FINTOC_LINK_TOKEN, per_page, page: 1 }
+  });
+  return r.data || [];
+}
+
+// === NUEVO jobs/refresh con type + force + debug + cache merchant ===
 app.get("/jobs/refresh", async (req, res) => {
   const t0 = Date.now();
+  const typeParam = String(req.query.type || "checking"); // 'checking' | 'credit' | 'all'
   const force = String(req.query.force_reclass || "0") === "1";
   const debug = String(req.query.debug || "0") === "1";
   const dryRun = String(req.query.dry_run || "0") === "1";
   const limit = Number(req.query.limit || 0);
 
   try {
-    // 1) Cargar cuenta, movimientos y taps
-    const accountId = await getCheckingAccountId();
-    let movs = await listRecentMovements(accountId);
-    if (limit && Number.isFinite(limit)) movs = movs.slice(0, limit);
+    // 1) Determinar qué cuentas procesar
+    const types = (typeParam === "all") ? ["checking","credit"] : [typeParam];
 
-    const taps = (await query(
-      "select * from tap_events where user_id = $1 order by ts desc limit 200",
-      ["demo"]
-    )).rows;
+    let totalUpserts = 0;
+    let totalMatchedWithTap = 0;
 
-    // 2) Enriquecer con match por tiempo
-    let merged = reconcile(taps, movs).map(m => {
-      const merchant =
-        m.merchant ??
-        m.raw?.merchant ??
-        m.raw?.counterparty?.name ??
-        null;
-      return { ...m, merchant, categoria: m.categoria ?? null };
-    });
+    for (const kind of types) {
+      const accountId = await getAccountIdByType(kind);
+      let movs = await listMovements(accountId);
+      if (limit && Number.isFinite(limit)) movs = movs.slice(0, limit);
 
-    // 3) Traer categorías ya guardadas para no recalcular (batch en un query)
-    const ids = merged.map(m => m.id);
-    const existing = await query(
-      "select id, categoria from movements where id = any($1)",
-      [ids]
-    );
-    const byId = new Map(existing.rows.map(r => [r.id, r.categoria]));
+      const taps = (await query(
+        "select * from tap_events where user_id=$1 order by ts desc limit 200",
+        ["demo"]
+      )).rows;
 
-    // 4) SQL de upsert (NO pisa categoria si viene null)
-    const upsertQ = `
-      insert into movements
-        (id, user_id, fecha, monto, moneda, descripcion, merchant, pending, lat, lon, address, categoria, raw)
-      values
-        ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-      on conflict (id) do update set
-        user_id     = excluded.user_id,
-        fecha       = excluded.fecha,
-        monto       = excluded.monto,
-        moneda      = excluded.moneda,
-        descripcion = excluded.descripcion,
-        merchant    = coalesce(excluded.merchant, movements.merchant),
-        pending     = excluded.pending,
-        lat         = coalesce(excluded.lat, movements.lat),
-        lon         = coalesce(excluded.lon, movements.lon),
-        address     = coalesce(excluded.address, movements.address),
-        categoria   = coalesce(excluded.categoria, movements.categoria),
-        raw         = excluded.raw,
-        updated_at  = now()
-    `;
+      // 2) Reconcile por tiempo
+      let merged = reconcile(taps, movs).map(m => {
+        const merchant = m.merchant ?? m.raw?.merchant ?? m.raw?.counterparty?.name ?? null;
+        return { ...m, merchant, categoria: m.categoria ?? null };
+      });
 
-    // 5) Helpers de clasificación con traza
-    async function classifyWithTrace(m) {
-      // Si ya existe en DB y no forzamos, usamos la existente
-      const catExisting = byId.get(m.id);
-      if (catExisting && !force) {
-        debug && logger.info({ id: m.id, categoria: catExisting, source: "db" }, "skip classify (already set)");
-        return { categoria: catExisting, source: "db" };
+      // 3) Traer categorías ya guardadas (para NO reclasificar)
+      const ids = merged.map(m => m.id);
+      const existing = await query("select id, categoria from movements where id = any($1)", [ids]);
+      const byId = new Map(existing.rows.map(r => [r.id, r.categoria]));
+
+      // 4) cargar cache de merchants existentes (opcional: on-demand)
+      async function getCachedCategory(merchant) {
+        if (!merchant) return null;
+        const key = merchant.trim().toLowerCase();
+        if (!key) return null;
+        const r = await query("select categoria from merchant_category_map where merchant=$1", [key]);
+        return r.rows[0]?.categoria || null;
+      }
+      async function setCachedCategory(merchant, categoria) {
+        if (!merchant || !categoria) return;
+        const key = merchant.trim().toLowerCase();
+        await query(
+          `insert into merchant_category_map (merchant, categoria, updated_at)
+           values ($1,$2,now())
+           on conflict (merchant) do update set categoria=excluded.categoria, updated_at=now()`,
+          [key, categoria]
+        );
       }
 
-      // Si el merged ya trae categoria y no forzamos, úsala
-      if (m.categoria && !force) {
-        debug && logger.info({ id: m.id, categoria: m.categoria, source: "merged" }, "skip classify (merged)");
-        return { categoria: m.categoria, source: "merged" };
+      const upsertQ = `
+        insert into movements
+          (id, user_id, fecha, monto, moneda, descripcion, merchant, pending, lat, lon, address, categoria, raw)
+        values
+          ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        on conflict (id) do update set
+          user_id     = excluded.user_id,
+          fecha       = excluded.fecha,
+          monto       = excluded.monto,
+          moneda      = excluded.moneda,
+          descripcion = excluded.descripcion,
+          merchant    = coalesce(excluded.merchant, movements.merchant),
+          pending     = excluded.pending,
+          lat         = coalesce(excluded.lat, movements.lat),
+          lon         = coalesce(excluded.lon, movements.lon),
+          address     = coalesce(excluded.address, movements.address),
+          categoria   = coalesce(excluded.categoria, movements.categoria),
+          raw         = excluded.raw,
+          updated_at  = now()
+      `;
+
+      let upserts = 0;
+      let matchedWithTap = 0;
+
+      for (const m of merged) {
+        if (m.lat != null && m.lon != null) matchedWithTap++;
+
+        // === DECISIÓN DE CATEGORÍA SIN FORZAR ===
+        let categoriaFinal = null;
+
+        const catExisting = byId.get(m.id);
+        if (catExisting && !force) {
+          categoriaFinal = catExisting;
+          debug && logger.info({ id: m.id, categoria: catExisting, source: "db", kind }, "skip classify (already set)");
+        } else if (m.categoria && !force) {
+          categoriaFinal = m.categoria;
+          debug && logger.info({ id: m.id, categoria: m.categoria, source: "merged", kind }, "skip classify (merged)");
+        } else {
+          // intentar cache por merchant
+          const cached = await getCachedCategory(m.merchant);
+          if (cached && !force) {
+            categoriaFinal = cached;
+            debug && logger.info({ id: m.id, categoria: cached, source: "cache", merchant: m.merchant, kind }, "use merchant cache");
+          } else {
+            // llamar IA (o heurística si no hay token), solo si hace falta
+            const t1 = Date.now();
+            const ai = await aiCategoryZeroShot([m.merchant, m.descripcion].filter(Boolean).join(" - ") || `monto ${m.monto}`);
+            if (ai) {
+              categoriaFinal = ai;
+              debug && logger.info({ id: m.id, categoria: ai, source: "ai", ms: Date.now() - t1, kind }, "classified");
+            } else {
+              const heu = heuristicCategory([m.merchant, m.descripcion].filter(Boolean).join(" - "));
+              categoriaFinal = heu;
+              debug && logger.info({ id: m.id, categoria: heu, source: "heuristic", kind }, "classified");
+            }
+            // guarda en cache por merchant
+            await setCachedCategory(m.merchant, categoriaFinal);
+          }
+        }
+
+        // escribe (salvo dry-run)
+        if (!dryRun) {
+          await query(upsertQ, [
+            m.id, m.user_id, m.fecha, m.monto, m.moneda, m.descripcion,
+            m.merchant, m.pending, m.lat, m.lon, m.address, categoriaFinal, m.raw
+          ]);
+          upserts++;
+        } else {
+          debug && logger.info({ id: m.id, categoria: categoriaFinal, kind }, "DRY-RUN upsert preview");
+        }
       }
 
-      const t1 = Date.now();
-      const catAI = await aiCategoryZeroShot(
-        [m.merchant, m.descripcion].filter(Boolean).join(" - ") || `monto ${m.monto}`
-      );
-      const took = Date.now() - t1;
-
-      if (catAI) {
-        debug && logger.info({ id: m.id, categoria: catAI, source: "ai", ms: took }, "classified");
-        return { categoria: catAI, source: "ai", ms: took };
-      }
-
-      // Fallback heurístico
-      const catHeu = heuristicCategory([m.merchant, m.descripcion].filter(Boolean).join(" - "));
-      debug && logger.info({ id: m.id, categoria: catHeu, source: "heuristic" }, "classified");
-      return { categoria: catHeu, source: "heuristic" };
+      totalUpserts += upserts;
+      totalMatchedWithTap += matchedWithTap;
+      logger.info({ kind, upserts, matchedWithTap }, "refresh pass done");
     }
 
-    // 6) Procesar y (opcionalmente) escribir
-    let upserts = 0;
-    let matchedWithTap = 0;
-
-    for (const m of merged) {
-      if (m.lat != null && m.lon != null) matchedWithTap++;
-
-      const { categoria, source } = await classifyWithTrace(m);
-      m.categoria = categoria;
-
-      if (dryRun) {
-        // Solo loguea, no escribe
-        debug && logger.info({
-          id: m.id, fecha: m.fecha, monto: m.monto, merchant: m.merchant,
-          categoria: m.categoria, source, pending: m.pending,
-          lat: m.lat, lon: m.lon
-        }, "DRY-RUN upsert preview");
-        continue;
-      }
-
-      await query(upsertQ, [
-        m.id, m.user_id, m.fecha, m.monto, m.moneda, m.descripcion,
-        m.merchant, m.pending, m.lat, m.lon, m.address, m.categoria, m.raw
-      ]);
-      upserts++;
-    }
-
-    const tookAll = Date.now() - t0;
-    logger.info({ upserts, matchedWithTap, tookMs: tookAll, force, limit, dryRun }, "jobs/refresh done");
-
-    return res.json({ ok: true, upserts, matchedWithTap, ms: tookAll, force, limit, dryRun });
+    const took = Date.now() - t0;
+    return res.json({ ok: true, upserts: totalUpserts, matchedWithTap: totalMatchedWithTap, ms: took, type: typeParam, force, dryRun });
   } catch (e) {
     logger.error(e);
     return res.status(500).json({ ok:false, error: e.message });
