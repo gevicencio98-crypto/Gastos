@@ -29,68 +29,126 @@ const pool = new Pool({
 
 
 
-
-
-// --- CATEGORIZACIÓN ---
+// ========================= CATEGORÍAS (macro) =========================
 const CATEGORIES = [
-  "Supermercado (compras en supermercados y minimarkets)",
-  "Comida y Bebida (cafeterías y restaurantes)",
-  "Transporte (Uber, taxis, metro, buses)",
-  "Combustible (gasolineras)",
-  "Suscripciones (Netflix, Spotify, etc.)",
-  "Servicios (internet, teléfono, luz, agua, gas)",
-  "Salud (farmacias, clínicas)",
-  "Educación (colegio, cursos)",
-  "Entretenimiento (cine, tickets, juegos)",
-  "Viajes (aerolíneas, hoteles)",
-  "Ropa (retail vestuario)",
-  "Hogar (mejoras, ferretería)",
-  "Tecnología (equipos, software)",
-  "Finanzas (comisiones bancarias)",
-  "Fiesta (carrete,entradas, eventos, bebidas alcoholicas)",
-  "Delivery (Uber eats, Rappi, PedidosYa)",
+  "Transporte",
+  "Comida",
+  "Mercado",
+  "Suscripciones",
+  "Servicios básicos",
+  "Entretenimiento",
+  "Delivery",
   "Otros"
 ];
 
-// Heurística simple si no hay IA (palabras clave -> categoría)
-function heuristicCategory(s) {
-  const t = (s || "").toLowerCase();
-  const has = (kw) => t.includes(kw);
-  if (["jumbo","lider","unimarc","tottus","santa isabel","super"].some(has)) return "Supermercado";
-  if (["uber","cabify","didi","metro","bus","bip"].some(has)) return "Transporte";
-  if (["copec","shell","terpel","enex","pronto"].some(has)) return "Combustible";
-  if (["netflix","spotify","youtube premium","amazon prime","disney"].some(has)) return "Suscripciones";
-  if (["entel","movistar","vtr","claro","telefonía","internet","luz","agua","gas"].some(has)) return "Servicios";
-  if (["farmacia","cruz verde","salcobrand","ahumada","isapre","clinica","salud"].some(has)) return "Salud";
-  if (["colegiatura","universidad","curso","udemy","colegio"].some(has)) return "Educación";
-  if (["cinema","cine","tiktok","spotify","steam","juego","ticket"].some(has)) return "Entretenimiento";
-  if (["hotel","airbnb","latam","sky airline","bus"].some(has)) return "Viajes";
-  if (["falabella","h&m","zara","nike","adidas"].some(has)) return "Ropa";
-  if (["sodimac","homy","easy"].some(has)) return "Hogar";
-  if (["apple","iphone","mac","pc","samsung","computador"].some(has)) return "Tecnología";
-  if (["comisión","cargo banco","interés"].some(has)) return "Finanzas";
-  if (["café","restaurant","restobar","burger","pizza","sushi","kfc","mc donald","mcdonald"].some(has)) return "Comida y Bebida";
-  if (["rappi","pedidos","ubereats"].some(has)) return "Delivery";
-  if (["liquidos"].some(has)) return "Fiesta";
-  return "Otros";
+// Palabras clave por categoría (marcas/terminología comunes en Chile)
+const KW = {
+  "Transporte": [
+    "uber","cabify","didi","beat","taxi","metro","subte","bus","bip","autopista","tag",
+    "estacionamiento","parking","peaje","red movilidad","latam"
+  ],
+  "Comida": [
+    "cafe","cafetería","cafeteria","restaurant","restobar","bar","pub","burger","pizza","sushi","empanada",
+    "kfc","mcdonald","mc donald","burger king","doggis","juan maestro","tanta","domino","telepizza",
+    "starbucks","juan valdez","dunkin","sangucheria","pasteleria","pastelería","pronto"
+  ],
+  "Mercado": [
+    "supermercado","super","minimarket","almacen","almacén","kiosko","kiosco","feria","bazar",
+    "lider","jumbo","tottus","unimarc","santa isabel","acuenta","ok market","oks market","spid",
+    "falabella","paris","ripley","h&m","hm","zara","nike","adidas","tricot","la polar","outlet","tienda",
+    "farmacia","cruz verde","salcobrand","ahumada","santa isabel","unimarc"
+  ],
+  "Suscripciones": [
+    "netflix","spotify","youtube premium","youtube","disney+","disney plus","amazon prime","hbo","max","appletv",
+    "apple tv","icloud","xbox game pass","playstation plus","patreon","notion","dropbox","adobe","microsoft 365"
+  ],
+  "Servicios básicos": [
+    "luz","electricidad","enel","cge","gas","metrogas","lipigas","abastible","gasco",
+    "agua","esval","aguas andinas","internet","fibra","telefonía","telefonia","entel","movistar","vtr","claro",
+    "unired","sii","patente","contribuciones","unired"
+  ],
+  "Entretenimiento": [
+    "cine","cinemark","cinépolis","ticket","passline","puntoticket","event","concierto","festival","teatro",
+    "casino","discoteca","discoteque","club","bar","tragos","alcohol","liquidos","licores","vino","cerveza",
+    "steam","epic games","xbox","playstation","nintendo","juego"
+  ],
+  "Delivery": [
+    "ubereats","uber eats","rappi","pedidosya","pedido ya","just eat","cornershop","jokr","glovo"
+  ],
+  "Otros": []
+};
+
+// ------------------ Utilidades de normalización ------------------
+function norm(s = "") {
+  return s.toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // quita acentos
+    .replace(/[^a-z0-9\s\.\-]/g, " ")                 // deja letras/números/espacios/.- 
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-// Llama Hugging Face Zero-Shot (BART-MNLI) si hay token
-// Modelo recomendado para español/multilenguaje:
-const HF_MODEL = process.env.HF_MODEL || "joeddav/xlm-roberta-large-xnli";
-// Probar también: "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7"
+function hasTerm(text, term) {
+  const t = norm(term);
+  if (!t) return false;
+  if (t.includes(" ")) return text.includes(t); // frase
+  const re = new RegExp(`(^|[^a-z0-9])${t}([^a-z0-9]|$)`); // palabra aprox
+  return re.test(text);
+}
 
-async function aiCategoryZeroShot(text, labels=CATEGORIES) {
+// ------------------ Heurística robusta ------------------
+function heuristicCategory(input) {
+  const t = norm(input || "");
+  let best = "Otros";
+  let bestScore = 0;
+
+  for (const cat of CATEGORIES) {
+    const kws = KW[cat] || [];
+    let score = 0;
+    for (const kw of kws) {
+      if (hasTerm(t, kw)) score++;
+    }
+    if (score > bestScore) { bestScore = score; best = cat; }
+  }
+
+  // Reglas extra rápidas (fallback)
+  if (best === "Otros") {
+    if (/\b(uber|cabify|didi|bip|metro|bus|peaje|autopista)\b/.test(t)) best = "Transporte";
+    else if (/\b(uber\s?eats|rappi|pedidos)\b/.test(t)) best = "Delivery";
+    else if (/\b(netflix|spotify|disney|hbo|max|appletv|icloud)\b/.test(t)) best = "Suscripciones";
+    else if (/\b(luz|gas|agua|internet|entel|movistar|vtr|claro|unired)\b/.test(t)) best = "Servicios básicos";
+    else if (/\b(jumbo|lider|tottus|unimarc|santa isabel|zara|h&m|falabella|paris|ripley)\b/.test(t)) best = "Mercado";
+    else if (/\b(cafe|restaurant|restobar|sushi|pizza|burger|starbucks|mcdonald)\b/.test(t)) best = "Comida";
+    else if (/\b(ticket|cine|concierto|bar|alcohol|licor|casino)\b/.test(t)) best = "Entretenimiento";
+  }
+  return best;
+}
+
+// ------------------ IA Zero-shot con prompt en español ------------------
+const HF_MODEL = process.env.HF_MODEL || "joeddav/xlm-roberta-large-xnli";
+
+function buildIAInput({ descripcion, merchant, monto }) {
+  const base = [merchant, descripcion, (monto!=null?`monto ${monto} CLP`:null)]
+    .filter(Boolean).join(" - ");
+
+  const hints = Object.entries(KW)
+    .filter(([cat]) => cat !== "Otros")
+    .map(([cat, arr]) => `${cat}: ${arr.slice(0,8).join(", ")}`) // top 8 por categoría
+    .join(" | ");
+
+  return `Clasifica en UNA sola categoría (Transporte, Comida, Mercado, Suscripciones, Servicios básicos, Entretenimiento, Delivery u Otros) esta transacción en Chile según comercio/descripcion/monto.
+Glosario (no exhaustivo): ${hints}
+Transacción: ${base}`;
+}
+
+async function aiCategoryZeroShot(text, labels = CATEGORIES) {
   const token = process.env.HF_API_TOKEN;
   if (!token) return null;
 
   const body = {
     inputs: text,
     parameters: {
-      // Etiquetas en español, bien definidas
-      candidate_labels: labels,            // puedes pasar array directamente
-      multi_label: false,                  // una sola categoría
-      // 👇 Plantilla/prompt en español: mejora bastante
+      candidate_labels: labels,         // array
+      multi_label: false,
       hypothesis_template: "Esta transacción pertenece a la categoría {label}."
     }
   };
@@ -98,21 +156,13 @@ async function aiCategoryZeroShot(text, labels=CATEGORIES) {
   try {
     const resp = await fetch(`https://api-inference.huggingface.co/models/${HF_MODEL}`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json"
-      },
+      headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify(body)
     });
     if (!resp.ok) return null;
     const data = await resp.json();
-
-    // Respuesta típica: {labels: [...], scores: [...]}
     if (Array.isArray(data.labels) && data.labels.length) return data.labels[0];
-
-    // Algunos providers devuelven un array de resultados
     if (Array.isArray(data) && data[0]?.labels?.length) return data[0].labels[0];
-
     return null;
   } catch {
     return null;
@@ -120,12 +170,14 @@ async function aiCategoryZeroShot(text, labels=CATEGORIES) {
 }
 
 async function classifyCategory({ descripcion, merchant, monto }) {
-  const baseText = [merchant, descripcion, `monto ${monto} CLP`].filter(Boolean).join(" - ");
-  const text = `Clasifica en una única categoría el siguiente comercio de Chile, hazlo según las palabras claves, si no sabes déjalo como otros. Por ejem: Liquidos es una conocida botillería en chile, por lo tanto sería Fiesta, mientras que Diddi, Pedidos Ya, Rappi son conocidas apps de delivery, por lo que deberían ser Delivery  ${baseText}`;
-  const ai = await aiCategoryZeroShot(text);
-  return ai || heuristicCategory(text);
-}
+  const text = buildIAInput({ descripcion, merchant, monto });
+  const ai = await aiCategoryZeroShot(text, CATEGORIES);
+  if (ai) return ai;
 
+  // Fallback a heurística
+  const baseText = [merchant, descripcion].filter(Boolean).join(" - ").trim() || `monto ${monto}`;
+  return heuristicCategory(baseText);
+}
 
 
 
