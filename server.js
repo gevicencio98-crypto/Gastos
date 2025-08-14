@@ -43,7 +43,14 @@ app.get("/health", async (_req, res) => {
 });
 
 function requireAppSecret(req, res, next) {
-  const token = req.header("X-App-Token");
+  const fromHeader =
+    req.get("X-App-Token") ||
+    req.get("x-app-token") ||
+    (req.get("Authorization") || "").replace(/^Bearer\s+/i, "");
+  const fromQuery = req.query?.app_token;
+  const fromBody  = req.body?.app_token;
+
+  const token = fromHeader || fromQuery || fromBody;
   if (!APP_SECRET) return res.status(500).json({ error: "APP_SECRET not set" });
   if (token !== APP_SECRET) return res.status(401).json({ error: "invalid token" });
   next();
