@@ -201,13 +201,15 @@ function reconcile(taps, movs) {
       id: m.id,
       user_id: "demo",
       fecha: t,
-      monto: (m.amount || 0) ,
+      monto: (m.amount || 0) / 100,          // ya corregido a pesos
       moneda: m.currency || "CLP",
       descripcion: m.description || null,
       pending: !!m.pending,
+      merchant: (m.merchant || m.counterparty?.name || null),
       lat: match?.lat ?? null,
       lon: match?.lon ?? null,
       address: match?.address ?? null,
+      categoria: null,
       raw: m
     };
   });
