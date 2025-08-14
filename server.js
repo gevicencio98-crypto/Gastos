@@ -65,7 +65,7 @@ async function aiCategoryZeroShot(text, labels=CATEGORIES) {
   const token = process.env.HF_API_TOKEN;
   if (!token) return null;
   try {
-    const resp = await fetch("https://api-inference.huggingface.co/models/facebook/bart-large-mnli", {
+    const resp = await fetch("https://api-inference.huggingface.co/models/joeddav/xlm-roberta-large-xnli", {
       method: "POST",
       headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ inputs: text, parameters: { candidate_labels: labels.join(", ") } })
