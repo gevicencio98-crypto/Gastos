@@ -264,6 +264,38 @@ app.post("/movements/manual", async (req, res) => {
   }
 });
 
+app.get("/debug/fintoc/accounts", async (_req, res) => {
+  try {
+    const r = await FINTOC.get("/accounts", { params: { link_token: process.env.FINTOC_LINK_TOKEN } });
+    const accounts = r.data || [];
+    const out = [];
+    for (const a of accounts) {
+      // intentamos ver 3 movs para tomar fechas recientes
+      let sample = [];
+      try {
+        const m = await FINTOC.get(`/accounts/${a.id}/movements`, {
+          params: { link_token: process.env.FINTOC_LINK_TOKEN, per_page: 3, page: 1 }
+        });
+        sample = (m.data || []).map(x => ({
+          id: x.id,
+          transaction_date: x.transaction_date,
+          post_date: x.post_date,
+          accounting_date: x.accounting_date,
+          description: x.description
+        }));
+      } catch (e) {}
+      out.push({
+        id: a.id, name: a.name, type: a.type, holder: a.holder_name,
+        last4: a.number?.slice(-4), institution: a.institution?.name,
+        sample
+      });
+    }
+    res.json(out);
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e.message });
+  }
+});
+
 app.get("/movements", async (req, res) => {
   const user_id = req.query.user_id || "demo";
   const category = req.query.category || null;
