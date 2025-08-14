@@ -301,33 +301,44 @@ app.post("/jobs/reclassify", async (req, res) => {
   }
 });
 
-app.get("/jobs/refresh", async (_req, res) => {
+
+app.get("/jobs/refresh", async (req, res) => {
+  const t0 = Date.now();
+  const force = String(req.query.force_reclass || "0") === "1";
+  const debug = String(req.query.debug || "0") === "1";
+  const dryRun = String(req.query.dry_run || "0") === "1";
+  const limit = Number(req.query.limit || 0);
+
   try {
-    // 1) Trae cuenta, movimientos y taps recientes
+    // 1) Cargar cuenta, movimientos y taps
     const accountId = await getCheckingAccountId();
-    const movs = await listRecentMovements(accountId);
+    let movs = await listRecentMovements(accountId);
+    if (limit && Number.isFinite(limit)) movs = movs.slice(0, limit);
+
     const taps = (await query(
-      "select * from tap_events where user_id = $1 order by ts desc limit 50",
+      "select * from tap_events where user_id = $1 order by ts desc limit 200",
       ["demo"]
     )).rows;
 
-    // 2) Une por proximidad temporal (tu función existente)
-    const merged = reconcile(taps, movs).map(m => {
-      // Asegura merchant/categoria en el objeto a upsertear
+    // 2) Enriquecer con match por tiempo
+    let merged = reconcile(taps, movs).map(m => {
       const merchant =
         m.merchant ??
         m.raw?.merchant ??
         m.raw?.counterparty?.name ??
         null;
-
-      return {
-        ...m,
-        merchant,
-        categoria: m.categoria ?? null
-      };
+      return { ...m, merchant, categoria: m.categoria ?? null };
     });
 
-    // 3) Upsert que NO pisa categoria ya guardada
+    // 3) Traer categorías ya guardadas para no recalcular (batch en un query)
+    const ids = merged.map(m => m.id);
+    const existing = await query(
+      "select id, categoria from movements where id = any($1)",
+      [ids]
+    );
+    const byId = new Map(existing.rows.map(r => [r.id, r.categoria]));
+
+    // 4) SQL de upsert (NO pisa categoria si viene null)
     const upsertQ = `
       insert into movements
         (id, user_id, fecha, monto, moneda, descripcion, merchant, pending, lat, lon, address, categoria, raw)
@@ -349,25 +360,69 @@ app.get("/jobs/refresh", async (_req, res) => {
         updated_at  = now()
     `;
 
-    // 4) Clasifica SOLO si falta, y upsertea
-    let count = 0;
+    // 5) Helpers de clasificación con traza
+    async function classifyWithTrace(m) {
+      // Si ya existe en DB y no forzamos, usamos la existente
+      const catExisting = byId.get(m.id);
+      if (catExisting && !force) {
+        debug && logger.info({ id: m.id, categoria: catExisting, source: "db" }, "skip classify (already set)");
+        return { categoria: catExisting, source: "db" };
+      }
+
+      // Si el merged ya trae categoria y no forzamos, úsala
+      if (m.categoria && !force) {
+        debug && logger.info({ id: m.id, categoria: m.categoria, source: "merged" }, "skip classify (merged)");
+        return { categoria: m.categoria, source: "merged" };
+      }
+
+      const t1 = Date.now();
+      const catAI = await aiCategoryZeroShot(
+        [m.merchant, m.descripcion].filter(Boolean).join(" - ") || `monto ${m.monto}`
+      );
+      const took = Date.now() - t1;
+
+      if (catAI) {
+        debug && logger.info({ id: m.id, categoria: catAI, source: "ai", ms: took }, "classified");
+        return { categoria: catAI, source: "ai", ms: took };
+      }
+
+      // Fallback heurístico
+      const catHeu = heuristicCategory([m.merchant, m.descripcion].filter(Boolean).join(" - "));
+      debug && logger.info({ id: m.id, categoria: catHeu, source: "heuristic" }, "classified");
+      return { categoria: catHeu, source: "heuristic" };
+    }
+
+    // 6) Procesar y (opcionalmente) escribir
+    let upserts = 0;
+    let matchedWithTap = 0;
+
     for (const m of merged) {
-      if (!m.categoria) {
-        m.categoria = await classifyCategory({
-          descripcion: m.descripcion,
-          merchant: m.merchant,
-          monto: m.monto
-        });
+      if (m.lat != null && m.lon != null) matchedWithTap++;
+
+      const { categoria, source } = await classifyWithTrace(m);
+      m.categoria = categoria;
+
+      if (dryRun) {
+        // Solo loguea, no escribe
+        debug && logger.info({
+          id: m.id, fecha: m.fecha, monto: m.monto, merchant: m.merchant,
+          categoria: m.categoria, source, pending: m.pending,
+          lat: m.lat, lon: m.lon
+        }, "DRY-RUN upsert preview");
+        continue;
       }
 
       await query(upsertQ, [
         m.id, m.user_id, m.fecha, m.monto, m.moneda, m.descripcion,
         m.merchant, m.pending, m.lat, m.lon, m.address, m.categoria, m.raw
       ]);
-      count++;
+      upserts++;
     }
 
-    return res.json({ ok: true, upserted: count });
+    const tookAll = Date.now() - t0;
+    logger.info({ upserts, matchedWithTap, tookMs: tookAll, force, limit, dryRun }, "jobs/refresh done");
+
+    return res.json({ ok: true, upserts, matchedWithTap, ms: tookAll, force, limit, dryRun });
   } catch (e) {
     logger.error(e);
     return res.status(500).json({ ok:false, error: e.message });
