@@ -382,13 +382,12 @@ app.get("/jobs/refresh", async (req, res) => {
 
       const upsertQ = `
         insert into movements
-          (id, user_id, fecha, monto, moneda, descripcion, merchant, pending, lat, lon, address, categoria, raw)
+          (id, user_id, fecha, monto, moneda, descripcion, merchant, pending, lat, lon, address, categoria, raw, tipo_cuenta)
         values
-          ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+          ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
         on conflict (id) do update set
           user_id     = excluded.user_id,
           fecha       = excluded.fecha,
-          tipo_cuenta = excluded.tipo_cuenta,
           monto       = excluded.monto,
           moneda      = excluded.moneda,
           descripcion = excluded.descripcion,
@@ -399,6 +398,7 @@ app.get("/jobs/refresh", async (req, res) => {
           address     = coalesce(excluded.address, movements.address),
           categoria   = coalesce(excluded.categoria, movements.categoria),
           raw         = excluded.raw,
+          tipo_cuenta = excluded.tipo_cuenta,
           updated_at  = now()
       `;
 
@@ -445,7 +445,8 @@ app.get("/jobs/refresh", async (req, res) => {
         if (!dryRun) {
           await query(upsertQ, [
             m.id, m.user_id, m.fecha, m.monto, m.moneda, m.descripcion,
-            m.merchant, m.pending, m.lat, m.lon, m.address, categoriaFinal, m.raw
+            m.merchant, m.pending, m.lat, m.lon, m.address, categoriaFinal, m.raw,
+            kind  // <= NUEVO: 'checking' o 'credit'
           ]);
           upserts++;
         } else {
