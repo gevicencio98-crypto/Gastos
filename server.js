@@ -151,18 +151,57 @@ app.post("/events/transaction", requireAppSecret, async (req, res) => {
   }
 });
 
+app.post("/movements/manual", async (req, res) => {
+  try {
+    const { fecha, monto, moneda="CLP", descripcion, merchant, user_id="demo", lat=null, lon=null, address=null, categoria=null } = req.body || {};
+    if (!fecha || monto == null) return res.status(400).json({ ok:false, error: "missing fecha/monto" });
+
+    const cat = categoria || await classifyCategory({ descripcion, merchant, monto });
+    const id = `manual_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+    await query(
+      `insert into movements (id, user_id, fecha, monto, moneda, descripcion, merchant, pending, lat, lon, address, categoria, raw)
+       values ($1,$2,$3,$4,$5,$6,$7,false,$8,$9,$10,$11,$12)`,
+      [id, user_id, fecha, monto, moneda, descripcion || null, merchant || null, lat, lon, address, cat, {}]
+    );
+    res.json({ ok:true, id, categoria: cat });
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e.message });
+  }
+});
+
 app.get("/movements", async (req, res) => {
   const user_id = req.query.user_id || "demo";
+  const category = req.query.category || null;
+  const qtext = req.query.q || null;
+  const onlyThisMonth = (req.query.month === "current");
+
+  const params = [user_id];
+  let sql = `
+    select id, user_id, fecha, monto, moneda, descripcion, merchant,
+           pending, lat, lon, address, categoria
+    from movements
+    where user_id = $1
+  `;
+
+  if (onlyThisMonth) {
+    sql += ` and date_trunc('month', fecha) = date_trunc('month', now()) `;
+  }
+  if (category) {
+    params.push(category);
+    sql += ` and categoria = $${params.length} `;
+  }
+  if (qtext) {
+    params.push(`%${qtext}%`);
+    sql += ` and (coalesce(descripcion,'') ilike $${params.length} or coalesce(merchant,'') ilike $${params.length}) `;
+  }
+  sql += ` order by fecha desc nulls last limit 500`;
+
   try {
-    const r = await query(
-      `select id, user_id, fecha, monto, moneda, descripcion, pending, lat, lon, address
-       from movements where user_id = $1
-       order by fecha desc nulls last limit 200`,
-      [user_id]
-    );
+    const r = await query(sql, params);
     res.json(r.rows);
   } catch (e) {
-    logger.error(e); res.status(500).json({ ok:false, error: e.message });
+    res.status(500).json({ ok:false, error: e.message });
   }
 });
 
@@ -241,7 +280,23 @@ app.get("/jobs/refresh", async (req, res) => {
                        raw=excluded.raw,
                        updated_at=now()`;
     for (const m of merged) {
-      await query(upsertQ, [m.id, m.user_id, m.fecha, m.monto, m.moneda, m.descripcion, m.pending, m.lat, m.lon, m.address, m.raw]);
+      // Clasifica si no hay categoría (o la dejamos recalcular siempre si quieres)
+      if (!m.categoria) {
+        m.categoria = await classifyCategory({
+          descripcion: m.descripcion,
+          merchant: m.merchant,
+          monto: m.monto
+        });
+      }
+      await query(upsertQ, [
+        m.id, m.user_id, m.fecha, m.monto, m.moneda, m.descripcion, m.pending,
+        m.lat, m.lon, m.address, m.raw
+      ]);
+      // Después del upsert, asegúrate de guardar la categoría
+      await query(
+        "update movements set categoria = $1 where id = $2",
+        [m.categoria, m.id]
+      );
     }
     res.json({ ok: true, upserted: merged.length });
   } catch (e) {
