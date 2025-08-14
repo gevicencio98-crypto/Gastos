@@ -25,6 +25,69 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false } // <— clave para evitar el error del certificado
 });
 
+
+
+
+
+
+
+// --- CATEGORIZACIÓN ---
+const CATEGORIES = [
+  "Supermercado", "Comida y Bebida", "Transporte", "Combustible",
+  "Suscripciones", "Servicios", "Salud", "Educación",
+  "Entretenimiento", "Viajes", "Ropa", "Hogar", "Tecnología",
+  "Finanzas", "Otros"
+];
+
+// Heurística simple si no hay IA (palabras clave -> categoría)
+function heuristicCategory(s) {
+  const t = (s || "").toLowerCase();
+  const has = (kw) => t.includes(kw);
+  if (["jumbo","lider","unimarc","tottus","santa isabel","super"].some(has)) return "Supermercado";
+  if (["uber","cabify","didi","metro","bus","bip"].some(has)) return "Transporte";
+  if (["copec","shell","terpel","enex","pronto"].some(has)) return "Combustible";
+  if (["netflix","spotify","youtube premium","amazon prime","disney"].some(has)) return "Suscripciones";
+  if (["entel","movistar","vtr","claro","telefonía","internet","luz","agua","gas"].some(has)) return "Servicios";
+  if (["farmacia","cruz verde","salcobrand","ahumada","isapre","clinica","salud"].some(has)) return "Salud";
+  if (["colegiatura","universidad","curso","udemy","colegio"].some(has)) return "Educación";
+  if (["cinema","cine","tiktok","spotify","steam","juego","ticket"].some(has)) return "Entretenimiento";
+  if (["hotel","airbnb","latam","sky airline","bus"].some(has)) return "Viajes";
+  if (["falabella","h&m","zara","nike","adidas"].some(has)) return "Ropa";
+  if (["sodimac","homy","easy"].some(has)) return "Hogar";
+  if (["apple","iphone","mac","pc","samsung","computador"].some(has)) return "Tecnología";
+  if (["comisión","cargo banco","interés"].some(has)) return "Finanzas";
+  if (["café","restaurant","restobar","burger","pizza","sushi","kfc","mc donald","mcdonald"].some(has)) return "Comida y Bebida";
+  return "Otros";
+}
+
+// Llama Hugging Face Zero-Shot (BART-MNLI) si hay token
+async function aiCategoryZeroShot(text, labels=CATEGORIES) {
+  const token = process.env.HF_API_TOKEN;
+  if (!token) return null;
+  try {
+    const resp = await fetch("https://api-inference.huggingface.co/models/facebook/bart-large-mnli", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ inputs: text, parameters: { candidate_labels: labels.join(", ") } })
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    // data.labels en orden de confianza
+    return Array.isArray(data.labels) && data.labels.length ? data.labels[0] : null;
+  } catch (_) { return null; }
+}
+
+async function classifyCategory({ descripcion, merchant, monto }) {
+  const baseText = [merchant, descripcion].filter(Boolean).join(" - ").trim();
+  const text = baseText || `monto ${monto}`;
+  const ai = await aiCategoryZeroShot(text);
+  return ai || heuristicCategory(text);
+}
+
+
+
+
+
 async function query(q, params) {
   const c = await pool.connect();
   try { return await c.query(q, params); } finally { c.release(); }
