@@ -61,20 +61,40 @@ function heuristicCategory(s) {
 }
 
 // Llama Hugging Face Zero-Shot (BART-MNLI) si hay token
+// Modelo recomendado para español/multilenguaje:
+const HF_MODEL = process.env.HF_MODEL || "joeddav/xlm-roberta-large-xnli";
+// Si prefieres BART (inglés): "facebook/bart-large-mnli"
+
 async function aiCategoryZeroShot(text, labels=CATEGORIES) {
   const token = process.env.HF_API_TOKEN;
-  if (!token) return null;
+  if (!token) return null; // si no hay token, cae a heurística
+
   try {
-    const resp = await fetch("https://api-inference.huggingface.co/models/joeddav/xlm-roberta-large-xnli", {
+    const resp = await fetch(`https://api-inference.huggingface.co/models/${HF_MODEL}`, {
       method: "POST",
-      headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ inputs: text, parameters: { candidate_labels: labels.join(", ") } })
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        inputs: text,
+        parameters: { candidate_labels: labels.join(", ") } // también puedes enviar array
+      })
     });
-    if (!resp.ok) return null;
+
+    if (!resp.ok) return null; // evita botar el flujo si el servicio rate-limita
     const data = await resp.json();
-    // data.labels en orden de confianza
-    return Array.isArray(data.labels) && data.labels.length ? data.labels[0] : null;
-  } catch (_) { return null; }
+
+    // En Inference API, la respuesta suele incluir 'labels' ordenadas por score
+    if (Array.isArray(data.labels) && data.labels.length) return data.labels[0];
+
+    // Algunos providers devuelven formato distinto; contempla ambas
+    if (Array.isArray(data) && data[0]?.labels?.length) return data[0].labels[0];
+
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 async function classifyCategory({ descripcion, merchant, monto }) {
@@ -254,33 +274,84 @@ function reconcile(taps, movs) {
   });
 }
 
-app.get("/jobs/refresh", async (req, res) => {
-  // reutiliza exactamente la misma lógica del POST /jobs/refresh
+app.post("/jobs/reclassify", async (req, res) => {
+  const force = String(req.query.force || "false") === "true";
   try {
+    const toFix = await query(
+      force
+        ? "select id, descripcion, merchant, monto from movements"
+        : "select id, descripcion, merchant, monto from movements where categoria is null"
+    );
+
+    let updated = 0;
+    for (const row of toFix.rows) {
+      const cat = await classifyCategory({
+        descripcion: row.descripcion,
+        merchant: row.merchant,
+        monto: row.monto
+      });
+      if (cat) {
+        await query("update movements set categoria = $1 where id = $2", [cat, row.id]);
+        updated++;
+      }
+    }
+    res.json({ ok: true, updated, force });
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e.message });
+  }
+});
+
+app.get("/jobs/refresh", async (_req, res) => {
+  try {
+    // 1) Trae cuenta, movimientos y taps recientes
     const accountId = await getCheckingAccountId();
     const movs = await listRecentMovements(accountId);
     const taps = (await query(
-      "select * from tap_events where user_id=$1 order by ts desc limit 50",
+      "select * from tap_events where user_id = $1 order by ts desc limit 50",
       ["demo"]
     )).rows;
-    const merged = reconcile(taps, movs);
 
-    const upsertQ = `insert into movements (id, user_id, fecha, monto, moneda, descripcion, pending, lat, lon, address, raw)
-                     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-                     on conflict (id) do update set
-                       user_id=excluded.user_id,
-                       fecha=excluded.fecha,
-                       monto=excluded.monto,
-                       moneda=excluded.moneda,
-                       descripcion=excluded.descripcion,
-                       pending=excluded.pending,
-                       lat=coalesce(excluded.lat, movements.lat),
-                       lon=coalesce(excluded.lon, movements.lon),
-                       address=coalesce(excluded.address, movements.address),
-                       raw=excluded.raw,
-                       updated_at=now()`;
+    // 2) Une por proximidad temporal (tu función existente)
+    const merged = reconcile(taps, movs).map(m => {
+      // Asegura merchant/categoria en el objeto a upsertear
+      const merchant =
+        m.merchant ??
+        m.raw?.merchant ??
+        m.raw?.counterparty?.name ??
+        null;
+
+      return {
+        ...m,
+        merchant,
+        categoria: m.categoria ?? null
+      };
+    });
+
+    // 3) Upsert que NO pisa categoria ya guardada
+    const upsertQ = `
+      insert into movements
+        (id, user_id, fecha, monto, moneda, descripcion, merchant, pending, lat, lon, address, categoria, raw)
+      values
+        ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+      on conflict (id) do update set
+        user_id     = excluded.user_id,
+        fecha       = excluded.fecha,
+        monto       = excluded.monto,
+        moneda      = excluded.moneda,
+        descripcion = excluded.descripcion,
+        merchant    = coalesce(excluded.merchant, movements.merchant),
+        pending     = excluded.pending,
+        lat         = coalesce(excluded.lat, movements.lat),
+        lon         = coalesce(excluded.lon, movements.lon),
+        address     = coalesce(excluded.address, movements.address),
+        categoria   = coalesce(excluded.categoria, movements.categoria),
+        raw         = excluded.raw,
+        updated_at  = now()
+    `;
+
+    // 4) Clasifica SOLO si falta, y upsertea
+    let count = 0;
     for (const m of merged) {
-      // Clasifica si no hay categoría (o la dejamos recalcular siempre si quieres)
       if (!m.categoria) {
         m.categoria = await classifyCategory({
           descripcion: m.descripcion,
@@ -288,21 +359,21 @@ app.get("/jobs/refresh", async (req, res) => {
           monto: m.monto
         });
       }
+
       await query(upsertQ, [
-        m.id, m.user_id, m.fecha, m.monto, m.moneda, m.descripcion, m.pending,
-        m.lat, m.lon, m.address, m.raw
+        m.id, m.user_id, m.fecha, m.monto, m.moneda, m.descripcion,
+        m.merchant, m.pending, m.lat, m.lon, m.address, m.categoria, m.raw
       ]);
-      // Después del upsert, asegúrate de guardar la categoría
-      await query(
-        "update movements set categoria = $1 where id = $2",
-        [m.categoria, m.id]
-      );
+      count++;
     }
-    res.json({ ok: true, upserted: merged.length });
+
+    return res.json({ ok: true, upserted: count });
   } catch (e) {
-    logger.error(e); res.status(500).json({ ok:false, error: e.message });
+    logger.error(e);
+    return res.status(500).json({ ok:false, error: e.message });
   }
 });
+
 // Igual que /events/transaction, pero vía GET con querystring
 app.get("/events/transaction-get", requireAppSecret, async (req, res) => {
   try {
