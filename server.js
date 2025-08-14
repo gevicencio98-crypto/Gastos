@@ -124,7 +124,7 @@ function heuristicCategory(input) {
 }
 
 // ------------------ IA Zero-shot con prompt en español ------------------
-const HF_MODEL = process.env.HF_MODEL || "joeddav/xlm-roberta-large-xnli";
+const HF_MODEL = process.env.HF_MODEL || "facebook/bart-large-mnli";
 
 // --- DEBUG: prueba directa de HuggingFace ---
 app.get("/debug/hf", async (req, res) => {
@@ -187,31 +187,66 @@ Transacción: ${base}`;
 
 async function aiCategoryZeroShot(text, labels = CATEGORIES) {
   const token = process.env.HF_API_TOKEN;
-  if (!token) return null;
+  if (!token) { 
+    logger.warn("HF_API_TOKEN missing"); 
+    return null; 
+  }
 
   const body = {
     inputs: text,
     parameters: {
-      candidate_labels: labels,         // array
+      // BART funciona bien con labels en inglés; pero podemos enviar español.
+      // Si quieres, luego mapeamos a inglés y devolvemos español.
+      candidate_labels: labels,          // array (NO string)
       multi_label: false,
+      // BART está entrenado en inglés, pero igual acepta template en español.
       hypothesis_template: "Esta transacción pertenece a la categoría {label}."
     }
   };
 
-  try {
-    const resp = await fetch(`https://api-inference.huggingface.co/models/${HF_MODEL}`, {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    if (Array.isArray(data.labels) && data.labels.length) return data.labels[0];
-    if (Array.isArray(data) && data[0]?.labels?.length) return data[0].labels[0];
-    return null;
-  } catch {
-    return null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const r = await fetch(`https://api-inference.huggingface.co/models/${HF_MODEL}`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+
+      const raw = await r.text();
+
+      // Manejo de estados típicos
+      if (r.status === 503 || r.status === 429) {
+        logger.warn({ attempt, status: r.status, raw: raw.slice(0, 200) }, "HF temp unavailable / rate limited");
+        await new Promise(res => setTimeout(res, attempt * 1000)); // backoff 1s, 2s, 3s
+        continue;
+      }
+      if (r.status === 401) { logger.warn("HF 401 Unauthorized: token inválido"); return null; }
+      if (r.status === 402) { logger.warn("HF 402 Payment Required: créditos agotados"); return null; }
+      if (!r.ok) {
+        logger.warn({ status: r.status, raw: raw.slice(0, 200) }, "HF not ok");
+        return null;
+      }
+
+      let data;
+      try { data = JSON.parse(raw); } 
+      catch (e) { 
+        logger.warn({ raw: raw.slice(0, 200) }, "HF JSON parse error"); 
+        return null; 
+      }
+
+      // Formato típico de BART/XNLI en Inference API:
+      // { labels: [...], scores: [...] }  O  [ { labels: [...], scores: [...] } ]
+      if (Array.isArray(data.labels) && data.labels.length) return data.labels[0];
+      if (Array.isArray(data) && data[0]?.labels?.length) return data[0].labels[0];
+
+      logger.info({ preview: JSON.stringify(data).slice(0, 200) }, "HF unexpected shape");
+      return null;
+    } catch (e) {
+      logger.error({ attempt, err: e.message }, "HF call failed");
+      await new Promise(res => setTimeout(res, attempt * 1000));
+    }
   }
+  return null;
 }
 
 async function getCreditCardAccountId(last4) {
