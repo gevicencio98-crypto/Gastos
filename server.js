@@ -566,11 +566,12 @@ app.get("/jobs/refresh", async (req, res) => {
             categoriaFinal = cached;
             debug && logger.info({ id: m.id, categoria: cached, source: "cache", merchant: m.merchant, kind }, "use merchant cache");
           } else {
-            
+            const prompt = [m.merchant, m.descripcion].filter(Boolean).join(" - ") || `monto ${m.monto}`;
+
             debug && logger.info({ id: m.id, prompt, kind }, "calling AI classification");
 
             const t1 = Date.now();
-            const ai = await aiCategoryZeroShot([m.merchant, m.descripcion].filter(Boolean).join(" - ") || `monto ${m.monto}`);
+            const ai = await aiCategoryZeroShot(prompt);
             if (ai) {
               categoriaFinal = ai;
               debug && logger.info({ id: m.id, categoria: ai, source: "ai", ms: Date.now() - t1, kind }, "classified");
