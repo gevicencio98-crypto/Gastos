@@ -126,6 +126,51 @@ function heuristicCategory(input) {
 // ------------------ IA Zero-shot con prompt en español ------------------
 const HF_MODEL = process.env.HF_MODEL || "joeddav/xlm-roberta-large-xnli";
 
+// --- DEBUG: prueba directa de HuggingFace ---
+app.get("/debug/hf", async (req, res) => {
+  try {
+    const text = req.query.text || "Compra en Starbucks - monto 4500 CLP";
+    const labels = ["Transporte","Comida","Mercado","Suscripciones","Servicios básicos","Entretenimiento","Delivery","Otros"];
+    const token = process.env.HF_API_TOKEN;
+    if (!token) return res.status(500).json({ ok:false, error:"HF_API_TOKEN not set" });
+
+    const body = {
+      inputs: text,
+      parameters: {
+        candidate_labels: labels,
+        multi_label: false,
+        hypothesis_template: "Esta transacción pertenece a la categoría {label}."
+      }
+    };
+
+    const r = await fetch(`https://api-inference.huggingface.co/models/${HF_MODEL}`, {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+
+    const rawText = await r.text(); // captura texto crudo para ver errores
+    let parsed;
+    try { parsed = JSON.parse(rawText); } catch { parsed = { parse_error: true, raw: rawText }; }
+
+    return res.json({
+      ok: r.ok,
+      status: r.status,
+      headers: {
+        // algunos headers útiles (pueden no venir)
+        ratelimit_limit: r.headers.get("x-ratelimit-limit"),
+        ratelimit_remaining: r.headers.get("x-ratelimit-remaining"),
+        ratelimit_reset: r.headers.get("x-ratelimit-reset")
+      },
+      model: HF_MODEL,
+      input_preview: text,
+      response: parsed
+    });
+  } catch (e) {
+    return res.status(500).json({ ok:false, error: e.message });
+  }
+});
+
 function buildIAInput({ descripcion, merchant, monto }) {
   const base = [merchant, descripcion, (monto!=null?`monto ${monto} CLP`:null)]
     .filter(Boolean).join(" - ");
