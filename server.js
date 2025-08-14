@@ -60,7 +60,7 @@ const KW = {
   ],
   "Suscripciones": [
     "netflix","spotify","youtube premium","youtube","disney+","disney plus","amazon prime","hbo","max","appletv",
-    "apple tv","apple","icloud","xbox game pass","playstation plus","patreon","notion","dropbox","adobe","microsoft 365"
+    "apple tv","apple","icloud","xbox game pass","playstation plus","patreon","notion","dropbox","adobe","openai","chatgpt","microsoft 365"
   ],
   "Servicios básicos": [
     "luz","electricidad","enel","cge","gas","metrogas","lipigas","abastible","gasco",
