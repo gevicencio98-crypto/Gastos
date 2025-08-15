@@ -355,6 +355,54 @@ app.post("/movements/manual", async (req, res) => {
     res.status(500).json({ ok:false, error: e.message });
   }
 });
+// Lista TODAS las cuentas de crédito con todos los campos relevantes
+app.get("/debug/fintoc/credit-accounts-full", async (_req, res) => {
+  try {
+    const r = await FINTOC.get("/accounts", { params: { link_token: process.env.FINTOC_LINK_TOKEN } });
+    const accounts = (r.data || []).filter(a => a.type === "credit_card");
+    const out = accounts.map(a => ({
+      id: a.id,
+      name: a.name,
+      institution: a.institution?.name,
+      currency: a.currency,
+      number: a.number,
+      last4: a.number?.slice(-4),
+      status: a.status,
+      balance: a.balance,
+      balance_date: a.balance_date
+    }));
+    res.json({ count: out.length, accounts: out });
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e.message });
+  }
+});
+
+// Muestra N movimientos de UNA cuenta por id (sin depender de last4)
+app.get("/debug/fintoc/sample-by-id", async (req, res) => {
+  const id = String(req.query.id || "");
+  const per_page = Number(req.query.per_page || 10);
+  const page = Number(req.query.page || 1);
+  if (!id) return res.status(400).json({ ok:false, error:"pass ?id=acc_XXXX" });
+  try {
+    const m = await FINTOC.get(`/accounts/${id}/movements`, {
+      params: { link_token: process.env.FINTOC_LINK_TOKEN, per_page, page }
+    });
+    const arr = (m.data || []).map(x => ({
+      id: x.id,
+      pending: !!x.pending,
+      description: x.description,
+      transaction_date: x.transaction_date,
+      post_date: x.post_date,
+      accounting_date: x.accounting_date,
+      amount: x.amount,
+      currency: x.currency
+    }));
+    res.json({ ok:true, id, page, per_page, count: arr.length, items: arr });
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e.message });
+  }
+});
+
 
 // MIDE la "recencia" de una subcuenta: recorre varias páginas y reporta fechas
 app.get("/debug/fintoc/range", async (req, res) => {
