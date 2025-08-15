@@ -356,6 +356,70 @@ app.post("/movements/manual", async (req, res) => {
   }
 });
 
+
+
+// --- DEBUG: lista TODAS las cuentas crédito y agrupa por last4
+app.get("/debug/fintoc/credit-accounts", async (req, res) => {
+  try {
+    const r = await FINTOC.get("/accounts", { params: { link_token: process.env.FINTOC_LINK_TOKEN } });
+    const accounts = (r.data || []).filter(a => a.type === "credit_card");
+
+    // formato resumido
+    const out = accounts.map(a => ({
+      id: a.id,
+      name: a.name,
+      institution: a.institution?.name,
+      currency: a.currency,
+      number: a.number,
+      last4: a.number?.slice(-4),
+    }));
+
+    // agrupa por last4 para ver subcuentas de un mismo plástico
+    const byLast4 = out.reduce((acc, a) => {
+      const k = a.last4 || "unknown";
+      acc[k] = acc[k] || [];
+      acc[k].push(a);
+      return acc;
+    }, {});
+
+    res.json({ count: out.length, byLast4 });
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e.message });
+  }
+});
+
+// --- DEBUG: muestra los movimientos de MÚLTIPLES accountId (muestra 5 por cada uno)
+app.get("/debug/fintoc/sample", async (req, res) => {
+  const last4 = String(req.query.last4 || "");
+  if (!last4) return res.status(400).json({ ok:false, error:"pass ?last4=xxxx" });
+
+  try {
+    const r = await FINTOC.get("/accounts", { params: { link_token: process.env.FINTOC_LINK_TOKEN } });
+    const matches = (r.data || []).filter(a => a.type === "credit_card" && a.number?.endsWith(last4));
+
+    const samples = [];
+    for (const a of matches) {
+      const m = await FINTOC.get(`/accounts/${a.id}/movements`, {
+        params: { link_token: process.env.FINTOC_LINK_TOKEN, per_page: 5, page: 1 }
+      });
+      samples.push({
+        account: { id: a.id, name: a.name, currency: a.currency, last4: a.number?.slice(-4) },
+        sample: (m.data || []).map(x => ({
+          id: x.id,
+          description: x.description,
+          pending: !!x.pending,
+          transaction_date: x.transaction_date,
+          post_date: x.post_date,
+          accounting_date: x.accounting_date
+        }))
+      });
+    }
+    res.json({ ok:true, last4, accounts: samples.length, samples });
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e.message });
+  }
+});
+
 app.get("/debug/fintoc/accounts", async (_req, res) => {
   try {
     const r = await FINTOC.get("/accounts", { params: { link_token: process.env.FINTOC_LINK_TOKEN } });
