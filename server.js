@@ -356,7 +356,49 @@ app.post("/movements/manual", async (req, res) => {
   }
 });
 
+// MIDE la "recencia" de una subcuenta: recorre varias páginas y reporta fechas
+app.get("/debug/fintoc/range", async (req, res) => {
+  const last4 = String(req.query.last4 || "");
+  const per_page = Number(req.query.per_page || 50);
+  const max_pages = Number(req.query.pages || 12); // prueba 12 páginas
+  if (!last4) return res.status(400).json({ ok:false, error:"pass ?last4=xxxx" });
 
+  try {
+    // reutiliza tu helper si lo tienes; si no:
+    const r = await FINTOC.get("/accounts", { params: { link_token: process.env.FINTOC_LINK_TOKEN } });
+    const matches = (r.data || []).filter(a => a.type === "credit_card" && a.number?.endsWith(last4));
+    if (!matches.length) return res.status(404).json({ ok:false, error:"no credit account for that last4" });
+
+    const out = [];
+    for (const a of matches) {
+      let maxDate = null, minDate = null, total = 0;
+      const pages = [];
+      for (let p=1; p<=max_pages; p++) {
+        const m = await FINTOC.get(`/accounts/${a.id}/movements`, {
+          params: { link_token: process.env.FINTOC_LINK_TOKEN, per_page, page: p }
+        });
+        const arr = (m.data || []);
+        total += arr.length;
+        const dates = arr.map(x => x.transaction_date || x.post_date || x.accounting_date).filter(Boolean);
+        const pageMax = dates.length ? dates.reduce((a,b)=>a>b?a:b) : null;
+        const pageMin = dates.length ? dates.reduce((a,b)=>a<b?a:b) : null;
+        if (pageMax && (!maxDate || pageMax > maxDate)) maxDate = pageMax;
+        if (pageMin && (!minDate || pageMin < minDate)) minDate = pageMin;
+        pages.push({ page: p, count: arr.length, pageMax, pageMin });
+        // si una página viene vacía, corta
+        if (!arr.length) break;
+      }
+      out.push({
+        account: { id: a.id, name: a.name, currency: a.currency, last4: a.number?.slice(-4) },
+        scanned: { pages: pages.length, per_page, total },
+        maxDate, minDate, pages
+      });
+    }
+    res.json({ ok:true, last4, accounts: out });
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e.message });
+  }
+});
 
 // --- DEBUG: lista TODAS las cuentas crédito y agrupa por last4
 app.get("/debug/fintoc/credit-accounts", async (req, res) => {
